@@ -3,6 +3,9 @@ from typing import List, Set, Union
 from collections import defaultdict, deque
 import heapq
 import time
+import math  # Import math
+from itertools import product  # Import product
+
 
 class WordTrieNode:
     def __init__(self, value: str, parent: Union['WordTrieNode', None]):
@@ -16,6 +19,7 @@ class WordTrieNode:
             return self.parent.get_word() + self.value
         else:
             return self.value
+
 
 class LetterBoxed:
     def __init__(self, input_string: str, dictionary: str):
@@ -67,7 +71,28 @@ class LetterBoxed:
             for starting_letter in starting_side:
                 if starting_letter in self.root.children:
                     all_valid_nodes += self._puzzle_words_inner(self.root.children[starting_letter], starting_side)
-        return [node.get_word() for node in all_valid_nodes]
+        initial_words = [node.get_word() for node in all_valid_nodes]
+
+        # Pre-filter puzzle_words
+        useful_words = []
+        for word in initial_words:
+            word_mask = 0
+            for char in word:
+                word_mask |= self.letter_to_bitmask[char]
+            is_useful = False
+            for other_word in initial_words:
+                if word == other_word:
+                    continue
+                other_word_mask = 0
+                for char in other_word:
+                    other_word_mask |= self.letter_to_bitmask[char]
+                if (word_mask & ~other_word_mask) != 0:
+                    is_useful = True
+                    break
+            if is_useful:
+                useful_words.append(word)
+
+        return useful_words
 
     def _find_solutions_inner(self, path_words: List[List[str]], letters_mask: int, next_letter: str, max_len: int) -> List[List[List[str]]]:
         if letters_mask == self.all_letters_mask:
@@ -86,7 +111,7 @@ class LetterBoxed:
                     )
                     solutions.extend(new_solutions)
         return solutions
-
+    
     def find_best_solution_dfs(self) -> List[str]:
         start_time = time.time()
         best_solution = []
@@ -108,62 +133,64 @@ class LetterBoxed:
         end_time = time.time()
         print(f"DFS Time: {end_time - start_time:.4f} seconds (No solution found)")
         return []
+    
+    def heuristic(self, letters_mask):
+        remaining_letters = bin(self.all_letters_mask & ~letters_mask).count('1')
+        if remaining_letters == 0:
+            return 0
+
+        if not hasattr(self, 'max_letters_data'):
+            self.max_letters_data = {}
+
+        if letters_mask not in self.max_letters_data:
+            max_letters_per_word = 0
+            for word in self.puzzle_words:
+                word_mask = 0
+                for char in word:
+                    word_mask |= self.letter_to_bitmask.get(char, 0)
+                covered_count = bin(word_mask & (~letters_mask) & self.all_letters_mask).count('1')
+                max_letters_per_word = max(max_letters_per_word, covered_count)
+            self.max_letters_data[letters_mask] = max_letters_per_word
+
+        max_letters_per_word = self.max_letters_data[letters_mask]
+
+        if max_letters_per_word == 0:
+            return float('inf')  # No word covers any new letters
+
+        return math.ceil(remaining_letters / max_letters_per_word)  # Use ceil for admissibility
+
 
     def find_best_solution_astar(self) -> List[str]:
         start_time = time.time()
-
-        def heuristic(letters_mask):
-            remaining_letters = bin(self.all_letters_mask & ~letters_mask).count('1')
-            if remaining_letters == 0:
-                return 0
-
-            # Precompute max_letters_per_word for efficiency
-            if not hasattr(self, 'max_letters_data'):
-                self.max_letters_data = {}  # Store precomputed data
-            
-            if letters_mask not in self.max_letters_data:
-              max_letters_per_word = 0
-              for word in self.puzzle_words:
-                  word_mask = 0
-                  for char in word:
-                      word_mask |= self.letter_to_bitmask.get(char, 0)
-
-                  covered_count = bin(word_mask & (~letters_mask) & self.all_letters_mask).count('1')
-                  max_letters_per_word = max(max_letters_per_word, covered_count)
-              self.max_letters_data[letters_mask] = max_letters_per_word
-
-            max_letters_per_word = self.max_letters_data[letters_mask]
-            
-            if max_letters_per_word == 0:
-                 return float('inf')
-
-            return (remaining_letters + max_letters_per_word - 1) // max_letters_per_word
-
+        best_solution_length = float('inf')  # Initialize with infinity
         open_set = []
 
-        for first_letter in self.puzzle_letters:
-            for last_letter in self.puzzle_letters:
-                for letter_edge_mask, edge_words in self.puzzle_graph[first_letter][last_letter].items():
-                    initial_state = ([edge_words], letter_edge_mask, last_letter)
-                    g_score = 1
-                    h_score = heuristic(letter_edge_mask)
-                    f_score = g_score + h_score
-                    # Use tie-breaker: (f_score, -g_score, state)
-                    heapq.heappush(open_set, (f_score, -g_score, initial_state))
+        for first_letter, last_letter in product(self.puzzle_letters, repeat=2):
+            for letter_edge_mask, edge_words in self.puzzle_graph[first_letter][last_letter].items():
+                initial_state = ([edge_words], letter_edge_mask, last_letter)
+                g_score = 1
+                h_score = self.heuristic(letter_edge_mask)
+                f_score = g_score + h_score
+                heapq.heappush(open_set, (f_score, -g_score, initial_state))
 
         visited = set()
 
         while open_set:
             f_score, neg_g_score, (path_words, letters_mask, next_letter) = heapq.heappop(open_set)
-            g_score = -neg_g_score  # Correctly recover g_score
+            g_score = -neg_g_score
 
-            state_tuple = (tuple(tuple(wl) for wl in path_words), letters_mask, next_letter)
+            # Early pruning based on best solution length
+            if g_score + self.heuristic(letters_mask) >= best_solution_length:
+                continue
+
+            state_tuple = (letters_mask, next_letter, len(path_words))
             if state_tuple in visited:
                 continue
             visited.add(state_tuple)
 
             if letters_mask == self.all_letters_mask:
                 flat_solution = [word for word_list in path_words for word in word_list]
+                best_solution_length = len(flat_solution)
                 end_time = time.time()
                 print(f"A* Time: {end_time - start_time:.4f} seconds")
                 return flat_solution
@@ -178,13 +205,14 @@ class LetterBoxed:
                         new_letters_mask = letters_mask | letter_edge_mask
                         new_path_words = path_words + [edge_words]
                         new_g_score = len(new_path_words)
-                        new_h_score = heuristic(new_letters_mask)
+                        new_h_score = self.heuristic(new_letters_mask)
                         new_f_score = new_g_score + new_h_score
                         new_state = (new_path_words, new_letters_mask, last_letter)
-                        new_state_tuple = (tuple(tuple(wl) for wl in new_path_words), new_letters_mask, last_letter)
+                        new_state_tuple = (new_letters_mask, last_letter, len(new_path_words))
 
                         if new_state_tuple not in visited:
-                            heapq.heappush(open_set, (new_f_score, -new_g_score, new_state))  # Use tie-breaker
+                            heapq.heappush(open_set, (new_f_score, -new_g_score, new_state))
+
 
         end_time = time.time()
         print(f"A* Time: {end_time - start_time:.4f} seconds (No solution found)")
@@ -195,6 +223,7 @@ class LetterBoxed:
         return self.find_best_solution_astar()
       else:
           return self.find_best_solution_dfs()
+
 
 
 if __name__ == '__main__':
